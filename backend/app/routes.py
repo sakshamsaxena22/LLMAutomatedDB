@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from typing import Any, Dict, List
+from typing import Dict, Any, List
 
 from app.llm import generate_query
 from app.validator import validate
@@ -12,50 +12,40 @@ router = APIRouter()
 
 @router.post("/query", response_model=QueryResponse)
 def query_transactions(payload: QueryRequest):
-    # 1. Basic request validation
-    if not payload.query or not payload.query.strip():
-        raise HTTPException(status_code=400, detail="Query cannot be empty")
-
     try:
-        # 2. Ask LLM to generate MongoDB query
-        llm_response: Dict[str, Any] = generate_query(payload.query)
+        llm_query: Dict[str, Any] = generate_query(payload.query)
 
-        # 3. Validate generated MongoDB query
-        validate(llm_response)
+        validate(llm_query)
 
-        # 4. Extract MongoDB parts safely
-        mongo_filter: Dict[str, Any] = llm_response.get("filter", {})
-        projection: Dict[str, Any] | None = llm_response.get("projection")
-        sort: List[Any] = llm_response.get("sort", [])
+        # 🔹 FIND QUERY
+        if "filter" in llm_query:
+            cursor = collection.find(
+                llm_query["filter"],
+                llm_query.get("projection"),
+            )
 
-        # 5. Execute MongoDB query correctly
-        cursor = collection.find(mongo_filter, projection)
+            if llm_query.get("sort"):
+                cursor = cursor.sort(llm_query["sort"])
 
-        if sort:
-            cursor = cursor.sort(sort)
+            results = list(cursor.limit(llm_query.get("limit", MAX_RESULTS)))
 
-        results: List[Dict[str, Any]] = list(cursor.limit(MAX_RESULTS))
+        # 🔹 AGGREGATION QUERY
+        elif "pipeline" in llm_query:
+            pipeline = llm_query["pipeline"] + [{"$limit": llm_query.get("limit", MAX_RESULTS)}]
+            results = list(collection.aggregate(pipeline))
 
-        # 6. Convert ObjectId → string for JSON serialization
+        else:
+            raise HTTPException(400, "Unsupported query structure")
+
         for doc in results:
-            if "_id" in doc:
-                doc["_id"] = str(doc["_id"])
+            doc["_id"] = str(doc["_id"])
 
-        # 7. Return structured API response
         return {
-            "generated_query": llm_response,
+            "generated_query": llm_query,
             "count": len(results),
             "results": results,
-            "raw_response": llm_response,
+            "raw_response": llm_query,
         }
 
-    except HTTPException:
-        # Re-raise FastAPI errors as-is
-        raise
-
     except Exception as exc:
-        # Catch unexpected runtime errors
-        raise HTTPException(
-            status_code=400,
-            detail=f"Query execution failed: {exc}"
-        )
+        raise HTTPException(status_code=400, detail=str(exc))
